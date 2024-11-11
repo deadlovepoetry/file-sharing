@@ -1,24 +1,22 @@
-// Updated server code with login and signup features
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <unistd.h>
+#include <pthread.h>
 #include <arpa/inet.h>
-#include <sys/socket.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/types.h>
-
-#define SERVER_CONTROL_PORT 4000
-#define CLIENT_DATA_PORT 5100
+#include <dirent.h>
+#define SERVER_CONTROL_PORT 3000
+#define CLIENT_DATA_PORT 3100
 #define MAX 81
 #define USER_DB "user_db.txt"
-
-bool authenticateUser(char *username, char *password);
-bool registerUser(char *username, char *password);
-void handleClientRequest(int clientC_FD);
-void handleUserCommands(int clientC_FD);
 
 bool authenticateUser(char *username, char *password) {
     FILE *fp = fopen(USER_DB, "r");
@@ -51,6 +49,95 @@ bool registerUser(char *username, char *password) {
     return true;
 }
 
+void parseFileName(char *buffer, char *filename, int i) {
+    strcpy(filename, buffer + i); // first i blocks contain command and space
+}
+
+int getServerDataSocket() {
+    int sockFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockFD < 0) {
+        perror("Failed to create server data socket");
+        exit(EXIT_FAILURE);
+    }
+    return sockFD;
+}
+void handleUserCommands(int clientC_FD);
+
+// Function to send a file to the client
+void sendFileFunc(FILE *fp) {
+    char buffer[MAX];
+    int bytes_read;
+    struct sockaddr_in client_addr;
+    int serverD_FD = getServerDataSocket();
+    bzero(&client_addr, sizeof(client_addr));
+
+    client_addr.sin_family = AF_INET;
+    client_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    client_addr.sin_port = htons(CLIENT_DATA_PORT);
+
+    if (connect(serverD_FD, (struct sockaddr *)&client_addr, sizeof(client_addr)) < 0) {
+        perror("Error connecting with client");
+        close(serverD_FD);
+        return;
+    }
+
+    while ((bytes_read = fread(buffer + 3, sizeof(char), MAX - 3, fp)) > 0) {
+        buffer[0] = (feof(fp)) ? 'L' : '*';
+        short data_length = htons(bytes_read);
+        memcpy(buffer + 1, &data_length, sizeof(short));
+
+        int bytes_sent = write(serverD_FD, buffer, bytes_read + 3);
+        if (bytes_sent < 0) {
+            perror("Send failed");
+            break;
+        }
+    }
+    close(serverD_FD);
+}
+
+// Function to receive a file from the client
+void getFile(char *filename) {
+    char buffer[MAX];
+    struct sockaddr_in client_addr;
+    int serverD_FD = getServerDataSocket();
+    bzero(&client_addr, sizeof(client_addr));
+
+    client_addr.sin_family = AF_INET;
+    client_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    client_addr.sin_port = htons(CLIENT_DATA_PORT);
+
+    if (connect(serverD_FD, (struct sockaddr *)&client_addr, sizeof(client_addr)) < 0) {
+        perror("Error connecting with client");
+        close(serverD_FD);
+        return;
+    }
+
+    FILE *fp = fopen(filename, "wb");
+    if (fp == NULL) {
+        perror("Error opening file");
+        close(serverD_FD);
+        return;
+    }
+
+    while (1) {
+        int bytes_recv = recv(serverD_FD, buffer, MAX, 0);
+        if (bytes_recv <= 0) {
+            break;
+        }
+
+        char flag = buffer[0];
+        short data_length = ntohs(*(short *)(buffer + 1));
+        fwrite(buffer + 3, sizeof(char), data_length, fp);
+        if (flag == 'L') {
+            break;
+        }
+    }
+
+    fclose(fp);
+    close(serverD_FD);
+}
+
+// Handle client requests for signup, login, and command handling
 void handleClientRequest(int clientC_FD) {
     char buffer[MAX], response[MAX];
     bzero(buffer, MAX);
@@ -83,19 +170,47 @@ void handleClientRequest(int clientC_FD) {
     send(clientC_FD, response, strlen(response), 0);
 }
 
+// Handle user commands like "get", "put", and "quit" after login
 void handleUserCommands(int clientC_FD) {
-    char buffer[MAX];
+    char buffer[MAX], server_response[MAX];
     while (1) {
         bzero(buffer, MAX);
         recv(clientC_FD, buffer, sizeof(buffer), 0);
-        if (strcmp(buffer, "quit") == 0) {
-            break;
+
+        if (strncmp(buffer, "cd", 2) == 0) {
+            char cmd[10];
+            strcpy(cmd, buffer + 3);
+            if (chdir(cmd) < 0) {
+                strcpy(server_response, "501");
+            } else {
+                strcpy(server_response, "200");
+            }
+            write(clientC_FD, server_response, sizeof(server_response));
         } else if (strncmp(buffer, "get", 3) == 0) {
-            // Handle file transfer
+            char filename[20];
+            parseFileName(buffer, filename, 4);
+            FILE *fp = fopen(filename, "rb");
+            if (fp == NULL) {
+                strcpy(server_response, "550");
+            } else {
+                strcpy(server_response, "201");
+                write(clientC_FD, server_response, sizeof(server_response));
+                sleep(1);
+                sendFileFunc(fp);
+                fclose(fp);
+            }
         } else if (strncmp(buffer, "put", 3) == 0) {
-            // Handle file upload
+            char filename[20];
+            parseFileName(buffer, filename, 4);
+            sleep(1);
+            getFile(filename);
+        } else if (strcmp(buffer, "quit") == 0) {
+            strcpy(server_response, "421");
+            write(clientC_FD, server_response, sizeof(server_response));
+            break;
         } else {
-            send(clientC_FD, "502 Command not implemented", 27, 0);
+            strcpy(server_response, "502 Command not implemented");
+            write(clientC_FD, server_response, sizeof(server_response));
         }
     }
 }
@@ -103,13 +218,14 @@ void handleUserCommands(int clientC_FD) {
 int main() {
     int sockC_FD, clientC_FD;
     struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
-
     sockC_FD = socket(AF_INET, SOCK_STREAM, 0);
     if (sockC_FD < 0) {
         perror("Socket creation failed");
-        exit(0);
+        exit(EXIT_FAILURE);
     }
+
+    if (setsockopt(sockC_FD, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0)
+        perror("setsockopt(SO_REUSEADDR) failed");
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -117,20 +233,23 @@ int main() {
 
     if (bind(sockC_FD, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Bind failed");
-        exit(0);
+        exit(EXIT_FAILURE);
     }
 
     if (listen(sockC_FD, 10) < 0) {
-        perror("Listen failed");
-        exit(0);
+        perror("Listening error");
+        exit(EXIT_FAILURE);
     }
+    printf("Server listening...\n");
 
-    printf("Server listening on port %d...\n", SERVER_CONTROL_PORT);
-
-    while ((clientC_FD = accept(sockC_FD, (struct sockaddr *)&client_addr, &client_len)) >= 0) {
-        printf("Client connected\n");
+    int len = sizeof(client_addr);
+    while ((clientC_FD = accept(sockC_FD, (struct sockaddr *)&client_addr, &len)) >= 0) {
         handleClientRequest(clientC_FD);
         close(clientC_FD);
+    }
+
+    if (clientC_FD < 0) {
+        perror("Error accepting client connection");
     }
 
     close(sockC_FD);
