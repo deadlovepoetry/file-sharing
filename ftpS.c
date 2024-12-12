@@ -64,7 +64,7 @@ int getServerDataSocket() {
 void handleUserCommands(int clientC_FD);
 
 // Function to send a file to the client
-void sendFileFunc(FILE *fp) {
+void sendFileFunc(FILE *fp, const char *filename) {
     char buffer[MAX];
     int bytes_read;
     struct sockaddr_in client_addr;
@@ -81,20 +81,44 @@ void sendFileFunc(FILE *fp) {
         return;
     }
 
+    // Get file information (size and modification time)
+    struct stat file_info;
+    if (stat(filename, &file_info) < 0) {
+        perror("Error getting file stats");
+        close(serverD_FD);
+        return;
+    }
+
+    // Prepare the metadata string
+    char metadata[MAX];
+    snprintf(metadata, MAX, "Name:%s|Size:%ld|Time:%ld|", filename, file_info.st_size, file_info.st_mtime);
+    printf("Sending metadata: %s\n", metadata);
+
+    // Send the metadata
+    if (write(serverD_FD, metadata, strlen(metadata)) < 0) {
+        perror("Failed to send metadata");
+        close(serverD_FD);
+        return;
+    }
+
+    // Send file data
     while ((bytes_read = fread(buffer + 3, sizeof(char), MAX - 3, fp)) > 0) {
-        buffer[0] = (feof(fp)) ? 'L' : '*';
-        short data_length = htons(bytes_read);
+        buffer[0] = (feof(fp)) ? 'L' : '*';  // 'L' for last block, '*' for regular
+        short data_length = htons(bytes_read);  // Store the length of the data
         memcpy(buffer + 1, &data_length, sizeof(short));
 
-        int bytes_sent = write(serverD_FD, buffer, bytes_read + 3);
+        int bytes_sent = write(serverD_FD, buffer, bytes_read + 3);  // Send data with metadata size
         if (bytes_sent < 0) {
             perror("Send failed");
             break;
         }
     }
+
     close(serverD_FD);
 }
 
+
+// Function to receive a file from the client
 // Function to receive a file from the client
 void getFile(char *filename) {
     char buffer[MAX];
@@ -119,16 +143,33 @@ void getFile(char *filename) {
         return;
     }
 
+    // Receive metadata first
+    int bytes_received = recv(serverD_FD, buffer, MAX, 0);
+    if (bytes_received <= 0) {
+        perror("Failed to receive metadata");
+        close(serverD_FD);
+        fclose(fp);
+        return;
+    }
+    buffer[bytes_received] = '\0';  // Null-terminate metadata
+    printf("Metadata received: %s\n", buffer);
+
+    // Parse metadata
+    char filename_received[100];
+    long file_size, file_time;
+    sscanf(buffer, "Name:%[^|]|Size:%ld|Time:%ld|", filename_received, &file_size, &file_time);
+    printf("Filename: %s, Size: %ld, Time: %ld\n", filename_received, file_size, file_time);
+
     while (1) {
         int bytes_recv = recv(serverD_FD, buffer, MAX, 0);
         if (bytes_recv <= 0) {
-            break;
+            break;  // End of file or error
         }
 
         char flag = buffer[0];
         short data_length = ntohs(*(short *)(buffer + 1));
-        fwrite(buffer + 3, sizeof(char), data_length, fp);
-        if (flag == 'L') {
+        fwrite(buffer + 3, sizeof(char), data_length, fp);  // Write file data
+        if (flag == 'L') {  // 'L' means last block
             break;
         }
     }
@@ -136,6 +177,7 @@ void getFile(char *filename) {
     fclose(fp);
     close(serverD_FD);
 }
+
 
 // Handle client requests for signup, login, and command handling
 void handleClientRequest(int clientC_FD) {
@@ -196,7 +238,7 @@ void handleUserCommands(int clientC_FD) {
                 strcpy(server_response, "201");
                 write(clientC_FD, server_response, sizeof(server_response));
                 sleep(1);
-                sendFileFunc(fp);
+                sendFileFunc(fp, filename);  // Provide both fp and filename here
                 fclose(fp);
             }
         } else if (strncmp(buffer, "put", 3) == 0) {
@@ -214,6 +256,7 @@ void handleUserCommands(int clientC_FD) {
         }
     }
 }
+
 
 int main() {
     int sockC_FD, clientC_FD;
