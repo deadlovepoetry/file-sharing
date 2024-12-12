@@ -52,7 +52,8 @@ void login(int clientC_FD) {
     char buffer[MAX];
     char username[50], password[50];
 
-    printf("Login\n");
+    printf("\n\nEnter the login credentials\n\n");
+
     printf("Enter username: ");
     fgets(username, sizeof(username), stdin);
     username[strcspn(username, "\n")] = 0;
@@ -94,9 +95,11 @@ void login(int clientC_FD) {
 }
 
 void displayMenu() {
+    printf("\n-----------------------------------------------\n");
     printf("1. Sign Up\n");
     printf("2. Login\n");
-    printf("3. Quit\n");
+    printf("3. Quit");
+    printf("\n-----------------------------------------------\n");
 }
 
 void parseFileName(char *buffer, char *filename, int i)
@@ -175,11 +178,79 @@ void checkStatusCode(char *response, int clientC_FD)
     }
     return;
 }
+void getFileWithMetadata(int clientC_FD, char *buffer) {
+    char metadata[MAX];
+    bzero(metadata, MAX);
 
+    struct sockaddr_in server_data_addr;
+    int serverD_FD, clientD_FD = getClientDataSocket();
 
+    if (listen(clientD_FD, 10) < 0) {
+        printf("Data port listening error\n");
+        return;
+    }
+
+    printf("Data port started listening\n");
+
+    int len = sizeof(server_data_addr);
+    serverD_FD = accept(clientD_FD, (struct sockaddr *)&server_data_addr, &len);
+    if (serverD_FD < 0) {
+        printf("Error accepting server data port\n");
+        close(clientD_FD);
+        return;
+    }
+
+    // Receive metadata
+    if (recv(serverD_FD, metadata, MAX, 0) <= 0) {
+        printf("Failed to receive metadata\n");
+        close(clientD_FD);
+        close(serverD_FD);
+        return;
+    }
+
+    // Parse metadata
+    char filename[100];
+    long filesize, timestamp;
+    sscanf(metadata, "Name:%[^|]|Size:%ld|Time:%ld|", filename, &filesize, &timestamp);
+
+    printf("Receiving file: %s (%ld bytes, timestamp: %ld)\n", filename, filesize, timestamp);
+
+    // Receive file data
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        perror("File open failed");
+        close(clientD_FD);
+        close(serverD_FD);
+        return;
+    }
+
+    long received = 0;
+    while (received < filesize) {
+        int bytes_recv = recv(serverD_FD, buffer, MAX, 0);
+        if (bytes_recv <= 0) {
+            break;
+        }
+
+        fwrite(buffer, sizeof(char), bytes_recv, fp);
+        received += bytes_recv;
+    }
+
+    fclose(fp);
+    printf("File received successfully.\n");
+
+    close(clientD_FD);
+    close(serverD_FD);
+}
+void getFile(int clientC_FD, char *buffer) {
+    getFileWithMetadata(clientC_FD, buffer);
+    printf("Received metadata: %s\n", buffer);
+
+}
+
+/*
 void getFile(int clientC_FD,char *buffer)
 {
-    
+   
     char response[MAX];
     bzero(response, MAX);
 
@@ -229,9 +300,89 @@ void getFile(int clientC_FD,char *buffer)
 
     fclose(fp);
     close(clientD_FD);
+    
+}*/
+void sendFileWithMetadata(char *filename) {
+    char metadata[MAX];
+    char buffer[MAX];
+    bzero(metadata, MAX);
+    bzero(buffer, MAX);
+
+    struct sockaddr_in server_data_addr;
+    int serverD_FD, clientD_FD = getClientDataSocket();
+
+    if (listen(clientD_FD, 10) < 0) {
+        printf("Data port listening error\n");
+        return;
+    }
+
+    printf("Data port started listening\n");
+
+    int len = sizeof(server_data_addr);
+    serverD_FD = accept(clientD_FD, (struct sockaddr *)&server_data_addr, &len);
+    if (serverD_FD < 0) {
+        printf("Error accepting server data port\n");
+        close(clientD_FD);
+        return;
+    }
+
+    // Get file metadata
+    struct stat file_stat;
+    if (stat(filename, &file_stat) < 0) {
+        perror("File stat failed");
+        close(clientD_FD);
+        close(serverD_FD);
+        return;
+    }
+
+    // Prepare metadata: Name, Size, Timestamp
+    snprintf(metadata, MAX, "Name:%s|Size:%ld|Time:%ld|Type:binary\n",
+             filename,
+             file_stat.st_size,
+             file_stat.st_mtime);
+
+    // Send metadata
+    if (send(serverD_FD, metadata, strlen(metadata), 0) < 0) {
+        perror("Failed to send metadata");
+        close(clientD_FD);
+        close(serverD_FD);
+        return;
+    }
+
+    // Send file data
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        perror("File open failed");
+        close(clientD_FD);
+        close(serverD_FD);
+        return;
+    }
+
+    while (!feof(fp)) {
+        int bytes_read = fread(buffer, sizeof(char), MAX, fp);
+        if (bytes_read > 0) {
+            if (send(serverD_FD, buffer, bytes_read, 0) < 0) {
+                perror("File data send failed");
+                fclose(fp);
+                close(clientD_FD);
+                close(serverD_FD);
+                return;
+            }
+        }
+    }
+
+    fclose(fp);
+    printf("File and metadata sent successfully.\n");
+    close(clientD_FD);
+    close(serverD_FD);
+}
+void sendFile(char *filename) {
+    sendFileWithMetadata(filename);
+   // printf("Sending metadata: %s\n", metadata);
+
 }
 
-void sendFile(char * filename)
+/*void sendFile(char * filename)
 {
     char buffer[MAX];
     bzero(buffer, MAX);
@@ -279,7 +430,7 @@ void sendFile(char * filename)
     }
 
 
-}
+}*/
 
 void handleClientConnection(int clientC_FD)
 {
@@ -301,7 +452,9 @@ void handleClientConnection(int clientC_FD)
     {
         bool flag = false;
         int ch;
-        printf(" 1. To change server directory\n 2. get file from server \n 3. send file to server\n 4. quit\n");
+        printf("\n-----------------------------------------------\n");
+        printf(" 1. Change server directory\n 2. Get file from server \n 3. Send file to server\n 4. quit\n");
+        printf("\n-----------------------------------------------\n");
         scanf("%d", &ch);
         getchar();
         bzero(buffer, MAX);
@@ -309,7 +462,8 @@ void handleClientConnection(int clientC_FD)
         {
         case 1:
         {
-            printf("enter the command to change directory (like > cd path)\n");
+            printf("\n-----------------------------------------------\n");
+            printf("Enter the command to change directory (like > cd path)\n");
             fflush(stdin);
             fgets(buffer, sizeof(buffer), stdin);  
             
@@ -327,7 +481,7 @@ void handleClientConnection(int clientC_FD)
         }
         case 2:
         {
-            // ask user for file name
+            printf("\n-----------------------------------------------\n");
             printf("enter the command (like > get filename)\n");
             fflush(stdin);
             //scanf("%[^\n]s",buffer);
@@ -350,7 +504,7 @@ void handleClientConnection(int clientC_FD)
         }
         case 3:
         {
-            // ask user for file name
+            printf("\n-----------------------------------------------\n");
             printf("enter the command (like > put filename)\n");
             fflush(stdin);
             //scanf("%[^\n]s",buffer);
@@ -410,11 +564,12 @@ int main()
         exit(0);
     }
     else
-        printf("connected with server..\n");
+        printf("--Connected to Server successfully--\n");
 
      int choice;
     while (1) {
         displayMenu();
+
         printf("Select option: ");
         scanf("%d", &choice);
         getchar();
